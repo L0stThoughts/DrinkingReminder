@@ -6,69 +6,99 @@ import threading
 import time
 import json
 import os
+import sys
 
 from playsound import playsound  # or use winsound/simpleaudio if you prefer
 
-def generate_bottle_images(
-    input_path: str,
-    mask_path: str = "bottle_mask.png",
-    empty_bottle_path: str = "empty_bottle.png",
-    blur_radius: int = 1,
-    threshold: int = 128
-):
+# NEW: import appdirs for cross-platform user-data location
+from appdirs import user_data_dir
+
+def resource_path(relative_path):
     """
-    Creates:
-      1) 'bottle_mask.png': black & white silhouette (white=bottle, black=background).
-      2) 'empty_bottle.png': a gray bottle on transparent background.
+    Used if you're embedding 'bottle.png' or 'tray_icon.png' via PyInstaller
+    with --add-data. This locates them at runtime.
+    """
+    try:
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
+def get_config_path():
+    """
+    Return the path to our water_data.json in the OS-specific user data directory.
+    e.g., on Windows:  C:\\Users\\<USER>\\AppData\\Roaming\\WaterTrackerApp\\water_data.json
+         on macOS:    ~/Library/Application Support/WaterTrackerApp/water_data.json
+         on Linux:     ~/.local/share/WaterTrackerApp/water_data.json
+    """
+    # You can change "WaterTrackerApp" if you like.
+    data_dir = user_data_dir(appname="WaterTrackerApp", appauthor=False)
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, "water_data.json")
+
+
+def generate_bottle_images_in_memory(input_path, blur_radius=1, threshold=128):
+    """
+    1) Load the bottle as grayscale, blur & threshold to get a mask silhouette (white=bottle).
+    2) Possibly invert if silhouette is black.
+    3) Create two in‐memory images:
+       - mask_img: a black‐and‐white silhouette
+       - empty_img: a gray silhouette (empty bottle), transparent outside
+    Returns (mask_img, empty_img) as PIL Image objects in memory.
     """
     img = Image.open(input_path).convert("L")
     img = img.filter(ImageFilter.GaussianBlur(radius=blur_radius))
     img = img.point(lambda p: 255 if p > threshold else 0)
 
-    # Possibly invert if the silhouette is mostly black
+    # Possibly invert if silhouette is black and background is white
     white_count = sum(1 for p in img.getdata() if p == 255)
     black_count = sum(1 for p in img.getdata() if p == 0)
     if black_count > white_count:
         img = ImageOps.invert(img)
 
-    # Save as mask
-    img.save(mask_path)
-    # Create a gray silhouette
+    # 'img' is now a mask: white = bottle, black = background
+    mask_img = img.copy()  # Keep a copy for the alpha mask
+
+    # Make a gray silhouette for an "empty" bottle
     width, height = img.size
-    empty_bottle = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    data = img.getdata()
+    empty_img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     new_data = []
     gray_color = (150, 150, 150, 255)
-    for px in data:
+    for px in img.getdata():
         if px == 255:
             new_data.append(gray_color)
         else:
-            new_data.append((0, 0, 0, 0))
-    empty_bottle.putdata(new_data)
-    empty_bottle.save(empty_bottle_path)
+            new_data.append((0, 0, 0, 0))  # Transparent background
+    empty_img.putdata(new_data)
+
+    return (mask_img, empty_img)
+
 
 class WaterTrackerApp:
     CAPACITY = 3000
-    DATA_FILE = "water_data.json"
 
     def __init__(self, bottle_path="bottle.png"):
+        # Create the Tk root
         self.root = tk.Tk()
         self.root.title("Water Tracker")
         self.root.configure(bg="#F0F0F0")
 
-        # Generate silhouettes from original bottle
-        generate_bottle_images(bottle_path, "bottle_mask.png", "empty_bottle.png")
+        # Convert path if using PyInstaller to embed bottle.png
+        bottle_path = resource_path(bottle_path)
 
-        # Load them
-        self.bottle_mask = Image.open("bottle_mask.png").convert("L")
-        self.empty_bottle = Image.open("empty_bottle.png").convert("RGBA")
+        # Generate the silhouettes in memory (no writing to disk)
+        mask_img, empty_img = generate_bottle_images_in_memory(bottle_path)
+
+        # We'll store them for use in 'update_filled_bottle'
+        self.bottle_mask = mask_img.convert("L")      # grayscale mask
+        self.empty_bottle = empty_img.convert("RGBA") # the empty gray silhouette
 
         # Defaults
         self.total_consumed = 0
 
-        # Load saved data (if any) before building the UI
+        # This will store the path to the user's custom sound
         self.custom_sound_path = tk.StringVar(value="")
-        self.load_data()
 
         # Minimizing to tray?
         self.minimize_to_tray = tk.BooleanVar(value=False)
@@ -77,15 +107,15 @@ class WaterTrackerApp:
         self.reminder_running = False
         self.reminder_minutes_var = tk.IntVar(value=1)
         self.next_reminder_time = 0
+
+        # Load saved data (if any)
         self.load_data()
 
-        # Build UI
+        # Build the UI
         self.create_main_layout()
-
-        # After layout is built, update the sound label based on loaded data
         self.update_sound_label()
 
-        # Tray icon references
+        # For tray minimization
         self.tray_icon = None
         self.tray_thread = None
 
@@ -95,15 +125,13 @@ class WaterTrackerApp:
         self.root.mainloop()
 
     def create_main_layout(self):
-        """Build main UI."""
-        # Left frame: bottle
+        """Build the main UI."""
         left_frame = tk.Frame(self.root, bg="#F0F0F0")
         left_frame.pack(side="left", padx=10, pady=10)
 
         self.bottle_label = tk.Label(left_frame, bg="#F0F0F0")
         self.bottle_label.pack()
 
-        # Right frame: controls
         right_frame = tk.Frame(self.root, bg="#F0F0F0")
         right_frame.pack(side="right", padx=10, pady=10)
 
@@ -116,10 +144,8 @@ class WaterTrackerApp:
         )
         self.status_label.pack(pady=5)
 
-        # +150 ml
         tk.Button(right_frame, text="+150 ml", command=self.add_150).pack(pady=5)
 
-        # Custom input
         custom_frame = tk.Frame(right_frame, bg="#F0F0F0")
         custom_frame.pack(pady=5)
 
@@ -128,10 +154,8 @@ class WaterTrackerApp:
         self.custom_entry.pack(side=tk.LEFT, padx=5)
         tk.Button(custom_frame, text="Add", command=self.add_custom).pack(side=tk.LEFT)
 
-        # Reset consumption
         tk.Button(right_frame, text="Reset Water", command=self.reset_consumption).pack(pady=5)
 
-        # Minimize to tray
         tray_check = tk.Checkbutton(
             right_frame,
             text="Minimize to Tray on Close",
@@ -140,14 +164,12 @@ class WaterTrackerApp:
         )
         tray_check.pack(pady=10)
 
-        # Reminder interval
         reminder_frame = tk.Frame(right_frame, bg="#F0F0F0")
         reminder_frame.pack(pady=5)
         tk.Label(reminder_frame, text="Reminder Interval (min):", bg="#F0F0F0").pack(side=tk.LEFT)
         tk.Spinbox(reminder_frame, from_=1, to=180,
                    textvariable=self.reminder_minutes_var, width=5).pack(side=tk.LEFT, padx=5)
 
-        # Start/Stop
         self.reminder_button = tk.Button(
             right_frame,
             text="Start Reminder",
@@ -155,7 +177,6 @@ class WaterTrackerApp:
         )
         self.reminder_button.pack(pady=5)
 
-        # Countdown label
         self.countdown_label = tk.Label(
             right_frame,
             text="No reminder active.",
@@ -164,7 +185,7 @@ class WaterTrackerApp:
         )
         self.countdown_label.pack(pady=5)
 
-        # Custom Sound (browse button)
+        # Custom sound
         sound_frame = tk.Frame(right_frame, bg="#F0F0F0")
         sound_frame.pack(pady=5)
 
@@ -175,17 +196,14 @@ class WaterTrackerApp:
         browse_btn = tk.Button(sound_frame, text="Browse", command=self.choose_sound_file)
         browse_btn.pack(side=tk.LEFT)
 
-        # Draw initial bottle
+        # Draw bottle initially
         self.update_filled_bottle()
 
     def choose_sound_file(self):
         """Open a file dialog to pick an audio file."""
         path = filedialog.askopenfilename(
             title="Select Reminder Sound",
-            filetypes=[
-                ("Audio Files", "*.mp3 *.wav"),
-                ("All Files", "*.*"),
-            ]
+            filetypes=[("Audio Files", "*.mp3 *.wav"), ("All Files", "*.*")]
         )
         if path:
             self.custom_sound_path.set(path)
@@ -227,6 +245,10 @@ class WaterTrackerApp:
         self.status_label.config(text=f"Consumed: {self.total_consumed} ml")
 
     def update_filled_bottle(self):
+        """
+        Use self.bottle_mask (L-mode) as the alpha mask to ensure the water fill
+        stays inside the silhouette, and self.empty_bottle as the base.
+        """
         ratio = min(1.0, self.total_consumed / self.CAPACITY)
         w, h = self.empty_bottle.size
         fill_height = int(h * ratio)
@@ -257,7 +279,6 @@ class WaterTrackerApp:
         """Live countdown until the next reminder beep."""
         if not self.reminder_running:
             return
-
         time_left = int(self.next_reminder_time - time.time())
         if time_left <= 0:
             self.play_reminder_sound()
@@ -299,16 +320,12 @@ class WaterTrackerApp:
             self.tray_thread.start()
 
     def setup_tray_icon(self):
-        """Create the pystray icon in a separate thread."""
-        # Load your custom icon from a file.
-        # Make sure 'my_tray_icon.png' is in the same folder or use an absolute path.
-        icon_image = Image.open("tray_icon.png")  # or ".ico"
-
+        icon_path = resource_path("tray_icon.png")  # if you have a tray icon embedded
+        icon_image = Image.open(icon_path)
         menu = pystray.Menu(
             pystray.MenuItem("Show Water Tracker", self.show_window),
             pystray.MenuItem("Exit", self.exit_app)
         )
-        
         self.tray_icon = pystray.Icon("WaterTracker", icon_image, "Water Tracker", menu)
         self.tray_icon.run()
 
@@ -328,37 +345,41 @@ class WaterTrackerApp:
             self.tray_icon.stop()
             self.tray_icon = None
 
+    #
+    # ----------- CHANGED SECTIONS BELOW: store data in appdirs user_data_dir -----------
+    #
+
     def load_data(self):
-        """Load previous water consumption, sound path, reminder state from JSON."""
-        if os.path.exists(self.DATA_FILE):
+        """
+        Load previous water consumption, sound path, reminder state
+        from a hidden file in the user's app data directory.
+        """
+        config_path = get_config_path()  # e.g., %APPDATA%/WaterTrackerApp/water_data.json
+        if os.path.exists(config_path):
             try:
-                with open(self.DATA_FILE, 'r', encoding='utf-8') as f:
+                with open(config_path, 'r', encoding='utf-8') as f:
                     saved = json.load(f)
-                    
-                    # Restore water amount
                     self.total_consumed = saved.get("total_consumed", 0)
-                    
-                    # Restore custom sound path
                     custom_sound = saved.get("custom_sound", "")
                     self.custom_sound_path.set(custom_sound)
-                    
-                    # Restore reminder interval => set spinbox
                     interval = saved.get("reminder_interval", 0)
                     self.reminder_minutes_var.set(interval)
             except:
                 pass
 
-
-
     def save_data(self):
-        """Save current water consumption, sound path, reminder state to JSON."""
+        """
+        Save current water consumption, sound path, reminder state
+        to a hidden file in the user's app data directory.
+        """
         data = {
             "total_consumed": self.total_consumed,
             "custom_sound": self.custom_sound_path.get().strip(),
             "reminder_interval": self.reminder_minutes_var.get(),
         }
+        config_path = get_config_path()
         try:
-            with open(self.DATA_FILE, 'w', encoding='utf-8') as f:
+            with open(config_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
         except:
             pass
