@@ -77,6 +77,7 @@ class WaterTrackerApp:
         self.reminder_running = False
         self.reminder_minutes_var = tk.IntVar(value=1)
         self.next_reminder_time = 0
+        self.load_data()
 
         # Build UI
         self.create_main_layout()
@@ -328,30 +329,40 @@ class WaterTrackerApp:
             self.tray_icon = None
 
     def load_data(self):
-        """Load previous water consumption & custom sound from JSON."""
+        """Load previous water consumption, sound path, reminder state from JSON."""
         if os.path.exists(self.DATA_FILE):
             try:
                 with open(self.DATA_FILE, 'r', encoding='utf-8') as f:
                     saved = json.load(f)
+                    
+                    # Restore water amount
                     self.total_consumed = saved.get("total_consumed", 0)
-                    self.self.reminder_minutes_var = saved.get("reminder_interval")
+                    
+                    # Restore custom sound path
                     custom_sound = saved.get("custom_sound", "")
                     self.custom_sound_path.set(custom_sound)
+                    
+                    # Restore reminder interval => set spinbox
+                    interval = saved.get("reminder_interval", 0)
+                    self.reminder_minutes_var.set(interval)
             except:
                 pass
 
+
+
     def save_data(self):
-        """Save current water consumption & sound path to JSON."""
+        """Save current water consumption, sound path, reminder state to JSON."""
         data = {
             "total_consumed": self.total_consumed,
             "custom_sound": self.custom_sound_path.get().strip(),
-            "reminder_interval": self.reminder_minutes_var.get()
+            "reminder_interval": self.reminder_minutes_var.get(),
         }
         try:
             with open(self.DATA_FILE, 'w', encoding='utf-8') as f:
                 json.dump(data, f)
         except:
             pass
+
 
 if __name__ == "__main__":
     WaterTrackerApp("bottle.png")
