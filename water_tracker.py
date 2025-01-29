@@ -1,15 +1,5 @@
 import sys
 import os
-
-# 1) Optional PyArmor runtime hook:
-#    This code won't matter if you run un-obfuscated, but once PyArmor adds
-#    runtime calls, this ensures everything can initialize properly.
-try:
-    from pytransform import pyarmor_runtime
-    pyarmor_runtime()
-except:
-    pass
-
 import tkinter as tk
 from tkinter import messagebox, filedialog
 import pystray
